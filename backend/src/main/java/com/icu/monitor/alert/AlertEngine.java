@@ -46,6 +46,8 @@ public class AlertEngine {
     @Value("${icu.alert.topics.alert}") private String alertTopic;
     @Value("${icu.alert.dedup-window-sec:60}") private int defaultDedupSec;
     @Value("${icu.alert.escalation-threshold:3}") private int defaultEscalationCount;
+    // CRITICAL 级别去重窗口默认与回放窗口一致：保证一次抢救事件全程只产生 1 个告警 ID
+    @Value("${icu.alert.playback-window-min:30}") private int criticalDedupWindowMin;
 
     // 床位最近 30s 内同患者其它通道滑动窗（用于交叉验证）
     private final ConcurrentHashMap<Long, RecentVitals> recentVitals = new ConcurrentHashMap<>();
@@ -117,7 +119,10 @@ public class AlertEngine {
 
     private AlertEvent decideAndPersist(DedupState s, UnifiedMessage m, String level) {
         OffsetDateTime now = m.getTime();
-        long windowSec = defaultDedupSec;
+        // CRITICAL 使用更大的去重窗口（与回放窗口一致），避免一次抢救事件被切分成多个告警 ID
+        long windowSec = "CRITICAL".equals(level)
+            ? Math.max(defaultDedupSec, (long) criticalDedupWindowMin * 60)
+            : defaultDedupSec;
         // 取医院策略
         if (m.getPatientId() != null) {
             // 简化：全部用默认策略；生产可按 hospitalId 加载
@@ -134,6 +139,10 @@ public class AlertEngine {
                 && !"CRITICAL".equals(level)) {
                 existing.setLevel("CRITICAL");
                 existing.setMessage(existing.getMessage() + "（已升级）");
+            } else if ("CRITICAL".equals(existing.getLevel())) {
+                // 已经是 CRITICAL，仅累加计数，不重复推 Kafka，否则回放服务会重复建会话
+                alertRepo.save(existing);
+                return null;
             } else {
                 return null;                                       // 静默，不推送
             }

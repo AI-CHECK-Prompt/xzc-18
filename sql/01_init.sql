@@ -227,6 +227,10 @@ CREATE TABLE IF NOT EXISTS playback_session (
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX idx_playback_bed ON playback_session(bed_id, start_at DESC);
+-- 同一 (bed, 触发告警) 在 ACTIVE 状态下全局唯一，DB 层兜底防止抢救事件产生多份重叠会话
+CREATE UNIQUE INDEX IF NOT EXISTS uq_playback_bed_alert_active
+    ON playback_session (bed_id, trigger_alert_id)
+    WHERE status = 'ACTIVE';
 
 -- 回放数据条目（用于时间轴串联展示）
 CREATE TABLE IF NOT EXISTS playback_item (

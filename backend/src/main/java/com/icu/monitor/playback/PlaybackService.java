@@ -20,6 +20,7 @@ import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * 抢救事件回放服务。
@@ -58,6 +59,8 @@ public class PlaybackService {
         try {
             AlertEvent a = json.readValue(payload, AlertEvent.class);
             if (!"CRITICAL".equals(a.getLevel())) return;
+            // 只对 OPEN 状态的告警建立/复用回放会话；ACK/CLOSED 不再触发
+            if (a.getStatus() != null && !"OPEN".equals(a.getStatus())) return;
             createSessionForAlert(a);
         } catch (Exception e) {
             log.warn("playback alert listener err: {}", e.getMessage());
@@ -66,6 +69,16 @@ public class PlaybackService {
 
     public PlaybackSession createSessionForAlert(AlertEvent a) {
         OffsetDateTime center = a.getTime();
+        // 幂等：同一 (bed_id, trigger_alert_id) 已有 ACTIVE 会话则直接复用，避免一次抢救事件产生 5 份重叠回放
+        if (a.getId() != null) {
+            Optional<PlaybackSession> exist = sessionRepo
+                .findFirstByBedIdAndTriggerAlertIdAndStatus(a.getBedId(), a.getId(), "ACTIVE");
+            if (exist.isPresent()) {
+                log.info("playback session exists (id={}), skip duplicate for bed={} alert={}",
+                    exist.get().getId(), a.getBedId(), a.getId());
+                return exist.get();
+            }
+        }
         PlaybackSession s = new PlaybackSession();
         s.setBedId(a.getBedId());
         s.setPatientId(a.getPatientId());
@@ -77,7 +90,8 @@ public class PlaybackService {
         s.setCreatedAt(OffsetDateTime.now());
         sessionRepo.save(s);
         buildItems(s);
-        log.info("playback session created: id={} bed={} [{} ~ {}]", s.getId(), s.getBedId(), s.getStartAt(), s.getEndAt());
+        log.info("playback session created: id={} bed={} alert={} [{} ~ {}]",
+            s.getId(), s.getBedId(), a.getId(), s.getStartAt(), s.getEndAt());
         return s;
     }
 
