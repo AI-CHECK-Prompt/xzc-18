@@ -95,17 +95,19 @@ public class Hl7V2Adapter implements DeviceProtocolAdapter {
             } catch (Exception ignore) {}
             for (int i = 0; i < oru.getPATIENT_RESULT().getORDER_OBSERVATION().getOBSERVATIONReps(); i++) {
                 var obs = oru.getPATIENT_RESULT().getORDER_OBSERVATION().getOBSERVATION(i);
-                for (int j = 0; j < obs.getOBSERVATIONReps(); j++) {
-                    OBX obx = obs.getOBX(j);
-                    String code = obx.getObservationIdentifier().getText().getValue();
-                    String val = obx.getObservationValue(0).getData();
-                    Double v;
-                    try { v = Double.parseDouble(val); } catch (Exception ex) { continue; }
-                    UnifiedMessage u = new UnifiedMessage(
-                        OffsetDateTime.now(ZoneId.of("UTC")),
-                        "HL7_V2", bedId, patientId, sn, code, v, null, 100, "RAW", null);
-                    publish(u);
-                }
+                // ORU_R01_OBSERVATION 内含一个 OBX：hapi v26 中 getOBX() 直接返回该 OBX
+                OBX obx = obs.getOBX();
+                if (obx == null) continue;
+                String code = obx.getObservationIdentifier().getText().getValue();
+                ca.uhn.hl7v2.model.Type valType = obx.getObservationValue(0);
+                String val = valType == null ? null : valType.toString();
+                if (val == null) continue;
+                Double v;
+                try { v = Double.parseDouble(val); } catch (Exception ex) { continue; }
+                UnifiedMessage u = new UnifiedMessage(
+                    OffsetDateTime.now(ZoneId.of("UTC")),
+                    "HL7_V2", bedId, patientId, sn, code, v, null, 100, "RAW", null);
+                publish(u);
             }
         } catch (Exception e) {
             System.err.println("[HL7_V2] parse error: " + e.getMessage());
@@ -120,10 +122,19 @@ public class Hl7V2Adapter implements DeviceProtocolAdapter {
 
     /** 模拟供自检使用 */
     public void injectMockMessage(String sn, String code, double val) {
+        injectMockMessage(sn, code, val, null);
+    }
+
+    /**
+     * 显式指定 patientId（用于"同床换患者"语义测试）。
+     * patientId 为 null 时回退到默认 1000+bedId（与原 3 参版本一致）。
+     */
+    public void injectMockMessage(String sn, String code, double val, Long patientId) {
         long bedId = snToBed.computeIfAbsent(sn, k -> bedSerial.getAndIncrement());
+        long pid = patientId != null ? patientId : 1000L + bedId;
         UnifiedMessage u = new UnifiedMessage(
             OffsetDateTime.now(ZoneId.of("UTC")),
-            "HL7_V2", bedId, 1000L + bedId, sn, code, val, null, 100, "RAW", null);
+            "HL7_V2", bedId, pid, sn, code, val, null, 100, "RAW", null);
         publish(u);
     }
 }

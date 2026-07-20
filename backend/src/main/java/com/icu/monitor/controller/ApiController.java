@@ -10,6 +10,7 @@ import com.icu.monitor.repository.AlertEscalationPolicyRepo;
 import com.icu.monitor.repository.AlertEventRepo;
 import com.icu.monitor.repository.BedRepo;
 import com.icu.monitor.repository.MonitorDeviceRepo;
+import com.icu.monitor.repository.OrderExecutionRepo;
 import com.icu.monitor.repository.PatientRepo;
 import com.icu.monitor.repository.ScoringRuleRepo;
 import com.icu.monitor.repository.TimeSeriesDao;
@@ -30,6 +31,7 @@ public class ApiController {
     @Autowired private AlertEventRepo alertRepo;
     @Autowired private AlertEscalationPolicyRepo policyRepo;
     @Autowired private ScoringRuleRepo scoringRuleRepo;
+    @Autowired private OrderExecutionRepo orderRepo;
     @Autowired private TimeSeriesDao tsDao;
     @Autowired private PluginRegistry pluginRegistry;
     @Autowired private Hl7V2Adapter hl7V2Adapter;
@@ -160,14 +162,15 @@ public class ApiController {
     public Map<String, Object> inject(@RequestParam String protocol,
                                       @RequestParam String sn,
                                       @RequestParam String channel,
-                                      @RequestParam double value) {
+                                      @RequestParam double value,
+                                      @RequestParam(required = false) Long patientId) {
         switch (protocol.toUpperCase()) {
-            case "HL7_V2":     hl7V2Adapter.injectMockMessage(sn, channel, value); break;
-            case "IHE_PCD":    ihePcdAdapter.injectMockMessage(sn, channel, value); break;
-            case "PRIVATE_TCP":privateTcpAdapter.injectMockMessage(sn, channel, value); break;
+            case "HL7_V2":     hl7V2Adapter.injectMockMessage(sn, channel, value, patientId); break;
+            case "IHE_PCD":    ihePcdAdapter.injectMockMessage(sn, channel, value, patientId); break;
+            case "PRIVATE_TCP":privateTcpAdapter.injectMockMessage(sn, channel, value, patientId); break;
             default: throw new IllegalArgumentException("unknown protocol: " + protocol);
         }
-        return Map.of("ok", true, "protocol", protocol, "channel", channel, "value", value);
+        return Map.of("ok", true, "protocol", protocol, "channel", channel, "value", value, "patientId", patientId == null ? -1L : patientId);
     }
 
     /** 13) 设备管理 */

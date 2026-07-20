@@ -52,6 +52,18 @@ icu:
       alert-dlq: icu.alert.dlq
   tcp-adapter-port: ${ICU_TCP_ADAPTER_PORT:9100}
   hl7-adapter-port: ${ICU_HL7_ADAPTER_PORT:9200}
+  # 评分引擎（2026-08 质控修复后）
+  scoring:
+    # 通道新鲜度：超过该秒数未上报即视为缺失（之前默认 60s 兜底导致 GCS=15）
+    freshness-sec: ${ICU_SCORING_FRESHNESS_SEC:60}
+    # 常规滚动评分间隔（ms）。修复前为 60000，掩盖了"通道晚到"期间的状态
+    roll-interval-ms: ${ICU_SCORING_ROLL_INTERVAL_MS:10000}
+    # 新转入患者"加强"窗口（秒）：窗口内使用更密评分
+    boost-window-sec: ${ICU_SCORING_BOOST_WINDOW_SEC:300}
+    # 加强窗口内的滚动间隔（ms）
+    boost-interval-ms: ${ICU_SCORING_BOOST_INTERVAL_MS:5000}
+    # 评估"刚转入"的最大秒数（强提醒；与 boost-window-sec 取较小者）
+    just-admitted-sec: ${ICU_SCORING_JUST_ADMITTED_SEC:300}
 
 logging:
   level:

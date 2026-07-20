@@ -83,7 +83,7 @@ public class AlertEngine {
         String alertType = alertTypeFor(m.getChannelCode(), m.getValueNum(), ruleDirection(m, level));
         String key = m.getBedId() + "|" + m.getChannelCode() + "|" + alertType;
         DedupState s = dedup.computeIfAbsent(key, k -> new DedupState());
-        AlertEvent ae = decideAndPersist(s, m, level);
+        AlertEvent ae = decideAndPersist(s, m, level, alertType);
 
         if (ae != null) {
             pusher.push(ae);
@@ -117,7 +117,7 @@ public class AlertEngine {
         return false;
     }
 
-    private AlertEvent decideAndPersist(DedupState s, UnifiedMessage m, String level) {
+    private AlertEvent decideAndPersist(DedupState s, UnifiedMessage m, String level, String alertType) {
         OffsetDateTime now = m.getTime();
         // CRITICAL 使用更大的去重窗口（与回放窗口一致），避免一次抢救事件被切分成多个告警 ID
         long windowSec = "CRITICAL".equals(level)

@@ -331,6 +331,8 @@ FROM hospital WHERE code='H001'
 ON CONFLICT (hospital_id, code, version) DO NOTHING;
 
 -- 默认评分规则：SOFA（6 个器官系统）
+-- 2026-08 质控修复：GCS 通道缺数据不再按 15 兜底，按"中重度神经受损"补 2 分；
+--                  评估不完整时禁止输出 NORMAL（最低 WARN）。
 INSERT INTO scoring_rule (hospital_id, code, name, drl_content, version, enabled)
 SELECT id, 'SOFA', '序贯器官衰竭评分',
 $$
@@ -343,6 +345,7 @@ rule "SOFA 计算"
         $ctx: ScoreContext(ruleCode == "SOFA")
     then
         double total = 0;
+        int missingCount = 0;
         // 呼吸系统：PaO2/FiO2
         if ($ctx.getPfRatio() != null) {
             double p = $ctx.getPfRatio();
@@ -351,7 +354,7 @@ rule "SOFA 计算"
             else if (p >= 200) total += 2;
             else if (p >= 100) total += 3;
             else total += 4;
-        }
+        } else { missingCount++; }
         // 凝血：血小板
         if ($ctx.getPlt() != null) {
             double p = $ctx.getPlt();
@@ -360,7 +363,7 @@ rule "SOFA 计算"
             else if (p >= 50)  total += 2;
             else if (p >= 20)  total += 3;
             else total += 4;
-        }
+        } else { missingCount++; }
         // 肝脏：胆红素
         if ($ctx.getBilirubin() != null) {
             double b = $ctx.getBilirubin();
@@ -369,12 +372,13 @@ rule "SOFA 计算"
             else if (b < 6.0) total += 2;
             else if (b < 12.0) total += 3;
             else total += 4;
-        }
-        // 心血管：升压药剂量
+        } else { missingCount++; }
+        // 心血管：升压药剂量 / MAP
         if ($ctx.getDopamine() != null && $ctx.getDopamine() > 5) total += 3;
         else if ($ctx.getDobutamine() != null && $ctx.getDobutamine() > 0) total += 2;
         else if ($ctx.getMap() != null && $ctx.getMap() < 70) total += 1;
-        // 神经：GCS
+        else if ($ctx.getMap() == null) { missingCount++; }
+        // 神经：GCS — 关键修复点
         if ($ctx.getGcs() != null) {
             int g = $ctx.getGcs();
             if (g >= 15) total += 0;
@@ -382,7 +386,11 @@ rule "SOFA 计算"
             else if (g >= 10) total += 2;
             else if (g >= 6)  total += 3;
             else total += 4;
-        }
+        } else if ($ctx.isGcsMissing()) {
+            // 通道缺数据：按"中重度神经受损"补 2 分（SOFA 神经子项 2-3 档）
+            // 不再像修复前那样用 GCS=15 兜底成 0 分
+            total += 2;
+        } else { missingCount++; }
         // 肾脏：肌酐
         if ($ctx.getCreatinine() != null) {
             double c = $ctx.getCreatinine();
@@ -391,10 +399,156 @@ rule "SOFA 计算"
             else if (c < 3.5) total += 2;
             else if (c < 5.0) total += 3;
             else total += 4;
+        } else { missingCount++; }
+
+        // 兜底：缺失关键通道时按"最不利"再 +1（每缺失一个，最多 +3）
+        if ($ctx.isIncompleteAssessment() && missingCount > 0) {
+            total += Math.min(missingCount, 3);
         }
-        String level = total >= 8 ? "CRITICAL" : (total >= 4 ? "WARN" : "NORMAL");
+        // 强制最低档：评估不完整时禁止 NORMAL；患者刚转入时直接 WARN
+        String level;
+        if (total >= 8) level = "CRITICAL";
+        else if (total >= 4) level = "WARN";
+        else if ($ctx.isIncompleteAssessment() || $ctx.isPatientJustAdmitted()) {
+            // 不完整或刚转入：最低 WARN（早发现早干预，避免把脓毒症休克当正常人）
+            level = "WARN";
+        } else {
+            level = "NORMAL";
+        }
+
         insert(new SOFAResult(total, level));
 end
 $$, 1, TRUE
+FROM hospital WHERE code='H001'
+ON CONFLICT (hospital_id, code, version) DO NOTHING;
+
+-- 2026-08 质控修复：作为"安全网"，再用 v2 插入同样安全语义的 DRL。
+-- 已部署的医院只需跑一次此 INSERT 即可热生效新逻辑（ScoringEngine 始终取最高版本）。
+INSERT INTO scoring_rule (hospital_id, code, name, drl_content, version, enabled)
+SELECT id, 'SOFA', '序贯器官衰竭评分（质控安全语义 v2）',
+$$
+import com.icu.monitor.scoring.ScoreContext
+import com.icu.monitor.scoring.SOFAResult
+
+rule "SOFA 计算"
+    salience 100
+    when
+        $ctx: ScoreContext(ruleCode == "SOFA")
+    then
+        double total = 0;
+        int missingCount = 0;
+        if ($ctx.getPfRatio() != null) {
+            double p = $ctx.getPfRatio();
+            if (p >= 400) total += 0; else if (p >= 300) total += 1;
+            else if (p >= 200) total += 2; else if (p >= 100) total += 3;
+            else total += 4;
+        } else { missingCount++; }
+        if ($ctx.getPlt() != null) {
+            double p = $ctx.getPlt();
+            if (p >= 150) total += 0; else if (p >= 100) total += 1;
+            else if (p >= 50)  total += 2; else if (p >= 20)  total += 3;
+            else total += 4;
+        } else { missingCount++; }
+        if ($ctx.getBilirubin() != null) {
+            double b = $ctx.getBilirubin();
+            if (b < 1.2) total += 0; else if (b < 2.0) total += 1;
+            else if (b < 6.0) total += 2; else if (b < 12.0) total += 3;
+            else total += 4;
+        } else { missingCount++; }
+        if ($ctx.getDopamine() != null && $ctx.getDopamine() > 5) total += 3;
+        else if ($ctx.getDobutamine() != null && $ctx.getDobutamine() > 0) total += 2;
+        else if ($ctx.getMap() != null && $ctx.getMap() < 70) total += 1;
+        else if ($ctx.getMap() == null) { missingCount++; }
+        if ($ctx.getGcs() != null) {
+            int g = $ctx.getGcs();
+            if (g >= 15) total += 0; else if (g >= 13) total += 1;
+            else if (g >= 10) total += 2; else if (g >= 6)  total += 3;
+            else total += 4;
+        } else if ($ctx.isGcsMissing()) {
+            total += 2; // GCS 缺：按中重度神经受损补分（修复前是 GCS=15 → 0）
+        } else { missingCount++; }
+        if ($ctx.getCreatinine() != null) {
+            double c = $ctx.getCreatinine();
+            if (c < 1.2) total += 0; else if (c < 2.0) total += 1;
+            else if (c < 3.5) total += 2; else if (c < 5.0) total += 3;
+            else total += 4;
+        } else { missingCount++; }
+        if ($ctx.isIncompleteAssessment() && missingCount > 0) {
+            total += Math.min(missingCount, 3);
+        }
+        String level;
+        if (total >= 8) level = "CRITICAL";
+        else if (total >= 4) level = "WARN";
+        else if ($ctx.isIncompleteAssessment() || $ctx.isPatientJustAdmitted()) level = "WARN";
+        else level = "NORMAL";
+        insert(new SOFAResult(total, level));
+end
+$$, 2, TRUE
+FROM hospital WHERE code='H001'
+ON CONFLICT (hospital_id, code, version) DO NOTHING;
+
+-- 2026-08 质控修复：MEWS 也做同样的安全语义改造（GCS 兜底、缺通道不评 NORMAL）
+INSERT INTO scoring_rule (hospital_id, code, name, drl_content, version, enabled)
+SELECT id, 'MEWS', '改良早期预警评分（质控安全语义 v2）',
+$$
+import com.icu.monitor.scoring.ScoreContext
+import com.icu.monitor.scoring.MEWSResult
+
+rule "MEWS 计算"
+    salience 100
+    when
+        $ctx: ScoreContext(ruleCode == "MEWS")
+    then
+        double score = 0;
+        int missingCount = 0;
+        if ($ctx.getSbp() != null) {
+            double sbp = $ctx.getSbp();
+            if (sbp < 70) score += 3; else if (sbp < 80) score += 2;
+            else if (sbp < 100) score += 1; else if (sbp <= 199) score += 0;
+            else score += 2;
+        } else { missingCount++; }
+        if ($ctx.getHr() != null) {
+            double hr = $ctx.getHr();
+            if (hr < 40) score += 2; else if (hr < 50) score += 1;
+            else if (hr <= 100) score += 0; else if (hr <= 110) score += 1;
+            else if (hr <= 130) score += 2; else score += 3;
+        } else { missingCount++; }
+        if ($ctx.getRr() != null) {
+            double rr = $ctx.getRr();
+            if (rr < 9) score += 2; else if (rr <= 14) score += 0;
+            else if (rr <= 20) score += 1; else if (rr <= 29) score += 2;
+            else score += 3;
+        } else { missingCount++; }
+        if ($ctx.getTemp() != null) {
+            double t = $ctx.getTemp();
+            if (t < 35) score += 2; else if (t <= 38.4) score += 0;
+            else score += 2;
+        } else { missingCount++; }
+        String avpu = $ctx.getAvpu();
+        if ("V".equals(avpu) || "P".equals(avpu)) score += 2;
+        else if ("U".equals(avpu)) score += 3;
+        else if (avpu == null) {
+            // AVPU 通道缺：按 P（疼痛刺激有反应）补 2 分
+            score += 2;
+            missingCount++;
+        }
+        // GCS 通道是神经状态的金标准，MEWS 借助它交叉验证
+        Integer gcs = $ctx.getGcs();
+        if (gcs != null && gcs.intValue() <= 8) {
+            score = Math.max(score, 3.0); // GCS<=8 至少 WARN
+        } else if ($ctx.isGcsMissing()) {
+            score += 1; // 缺 GCS：补 1 分（保守）
+        }
+        if ($ctx.isIncompleteAssessment() && missingCount > 0) {
+            score += Math.min(missingCount, 2);
+        }
+        String level;
+        if (score >= 5) level = "CRITICAL";
+        else if (score >= 3) level = "WARN";
+        else if ($ctx.isIncompleteAssessment() || $ctx.isPatientJustAdmitted()) level = "WARN";
+        else level = "NORMAL";
+        insert(new MEWSResult(score, level));
+end
+$$, 2, TRUE
 FROM hospital WHERE code='H001'
 ON CONFLICT (hospital_id, code, version) DO NOTHING;

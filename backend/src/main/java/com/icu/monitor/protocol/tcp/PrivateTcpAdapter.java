@@ -10,6 +10,7 @@ import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.codec.ByteToMessageDecoder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
@@ -113,10 +114,16 @@ public class PrivateTcpAdapter implements DeviceProtocolAdapter {
     }
 
     public void injectMockMessage(String sn, String code, double val) {
+        injectMockMessage(sn, code, val, null);
+    }
+
+    /** 显式指定 patientId（用于"同床换患者"语义测试） */
+    public void injectMockMessage(String sn, String code, double val, Long patientId) {
         long bedId = snToBed.computeIfAbsent(sn, k -> bedSerial.getAndIncrement());
+        long pid = patientId != null ? patientId : 3000L + bedId;
         UnifiedMessage u = new UnifiedMessage(
             OffsetDateTime.now(ZoneId.of("UTC")),
-            "PRIVATE_TCP", bedId, 3000L + bedId, sn, code, val, null, 100, "RAW", null);
+            "PRIVATE_TCP", bedId, pid, sn, code, val, null, 100, "RAW", null);
         try { kafka.send("icu.sample.raw", u.getBedId().toString(), json.writeValueAsString(u)); } catch (Exception ignore) {}
     }
 }

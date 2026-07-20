@@ -94,10 +94,16 @@ public class IhePcdAdapter implements DeviceProtocolAdapter {
     }
 
     public void injectMockMessage(String sn, String code, double val) {
+        injectMockMessage(sn, code, val, null);
+    }
+
+    /** 显式指定 patientId（用于"同床换患者"语义测试） */
+    public void injectMockMessage(String sn, String code, double val, Long patientId) {
         long bedId = snToBed.computeIfAbsent(sn, k -> bedSerial.getAndIncrement());
+        long pid = patientId != null ? patientId : 2000L + bedId;
         UnifiedMessage u = new UnifiedMessage(
             OffsetDateTime.now(ZoneId.of("UTC")),
-            "IHE_PCD", bedId, 2000L + bedId, sn, code, val, null, 100, "RAW", null);
+            "IHE_PCD", bedId, pid, sn, code, val, null, 100, "RAW", null);
         publish(u);
     }
 }
