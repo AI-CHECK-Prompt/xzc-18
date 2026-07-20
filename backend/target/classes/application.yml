@@ -1,0 +1,61 @@
+server:
+  port: 8080
+  tomcat:
+    threads:
+      max: 400
+
+spring:
+  application:
+    name: icu-monitor
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/icu_monitor}
+    username: ${SPRING_DATASOURCE_USERNAME:icu}
+    password: ${SPRING_DATASOURCE_PASSWORD:icu_pwd_2026}
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 200
+        order_inserts: true
+    open-in-view: false
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: icu-monitor
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        linger.ms: 5
+        batch.size: 65536
+        compression.type: lz4
+    listener:
+      concurrency: 4
+
+icu:
+  alert:
+    dedup-window-sec: ${ICU_ALERT_DEDUP_WINDOW_SEC:60}
+    escalation-threshold: ${ICU_ALERT_ESCALATION_THRESHOLD:3}
+    playback-window-min: ${ICU_PLAYBACK_WINDOW_MIN:30}
+    topics:
+      raw: icu.sample.raw
+      metric: icu.sample.metric
+      alert: icu.alert
+      alert-dlq: icu.alert.dlq
+  tcp-adapter-port: ${ICU_TCP_ADAPTER_PORT:9100}
+  hl7-adapter-port: ${ICU_HL7_ADAPTER_PORT:9200}
+
+logging:
+  level:
+    root: INFO
+    com.icu.monitor: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{module}] %logger{20} - %msg%n"
