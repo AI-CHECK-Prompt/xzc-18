@@ -135,10 +135,22 @@ public class ApiController {
 
     /** 10) HIS 同步：患者档案 / 医嘱 */
     @PostMapping("/his/patient")
-    public Patient hisPatient(@RequestBody Patient p) {
+    public Patient hisPatient(@RequestBody(required = false) Patient p,
+                              @RequestParam(required = false) Long hospitalId,
+                              @RequestParam(required = false) String mrn,
+                              @RequestParam(required = false) String name,
+                              @RequestParam(required = false) String gender,
+                              @RequestParam(required = false) String birthDate,
+                              @RequestParam(required = false) String diagnosis) {
+        if (p == null) p = new Patient();
         p.setCreatedAt(OffsetDateTime.now());
-        if (p.getNameMask() == null) p.setNameMask("张*");
+        if (p.getNameMask() == null) p.setNameMask(name == null ? "张*" : name);
         if (p.getNameEnc() == null) p.setNameEnc(new byte[]{0});
+        if (p.getHospitalId() == null && hospitalId != null) p.setHospitalId(hospitalId);
+        if (p.getMrn() == null && mrn != null) p.setMrn(mrn);
+        if (p.getGender() == null && gender != null) p.setGender(gender);
+        if (p.getBirthDate() == null && birthDate != null) p.setBirthDate(java.time.LocalDate.parse(birthDate));
+        if (p.getDiagnosis() == null && diagnosis != null) p.setDiagnosis(diagnosis);
         return patientRepo.save(p);
     }
 

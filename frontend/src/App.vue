@@ -4,6 +4,10 @@
       <h1>ICU 多床位监护与早期预警系统</h1>
       <nav>
         <router-link to="/">总览</router-link>
+        <router-link to="/alliance">多院区联盟</router-link>
+        <router-link to="/similar">相似病例</router-link>
+        <router-link to="/qc">联合质控</router-link>
+        <router-link to="/whatif">事后回放</router-link>
         <router-link to="/playback">事件回放</router-link>
         <router-link to="/rules">评分规则</router-link>
       </nav>

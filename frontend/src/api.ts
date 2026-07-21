@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const http = axios.create({ baseURL: '/api', timeout: 10000 })
+const http = axios.create({ baseURL: '/api', timeout: 15000 })
 
 export default {
   beds: () => http.get('/beds'),
@@ -25,5 +25,30 @@ export default {
   playbackByBed: (bedId: number) => http.get(`/playback/by-bed/${bedId}`),
   playbackItems: (sessionId: number) => http.get(`/playback/${sessionId}/items`),
   playbackManual: (bedId: number, patientId?: number, centerAt?: string) =>
-    http.post(`/playback/manual`, null, { params: { bedId, patientId, centerAt } })
+    http.post(`/playback/manual`, null, { params: { bedId, patientId, centerAt } }),
+
+  // 联合质控（多院区）
+  alliance: {
+    list: () => http.get('/alliance/list'),
+    members: (id: number) => http.get(`/alliance/${id}/members`),
+    join: (id: number, hospitalId: number, role = 'MEMBER') =>
+      http.post(`/alliance/${id}/join`, null, { params: { hospitalId, role } }),
+    share: (params: any, body: any) => http.post('/alliance/share', body, { params }),
+    pool: (params: any) => http.get('/alliance/pool', { params }),
+    poolDetail: (id: number) => http.get(`/alliance/pool/${id}`),
+    topSimilar: (params: any, body: any) => http.post('/alliance/similar/top', body, { params }),
+    recommend: (params: any, body: any) => http.post('/alliance/plan/recommend', body, { params }),
+    guideline: (drgCode?: string) => http.get('/alliance/guideline', { params: { drgCode } }),
+    planTemplate: (allianceId: number, drgCode?: string) =>
+      http.get('/alliance/plan/template', { params: { allianceId, drgCode } }),
+    qcCompare: (params: any) => http.get('/alliance/qc/compare', { params }),
+    qcBreakdown: (params: any) => http.get('/alliance/qc/breakdown', { params }),
+    qcAggregate: (params: any) => http.post('/alliance/qc/aggregate', null, { params }),
+    sofaCurve: (params: any) => http.get('/alliance/qc/sofa-curve', { params }),
+    qcReport: (params: any) => http.post('/alliance/qc/report', null, { params }),
+    reportList: (allianceId: number) => http.get('/alliance/qc/report', { params: { allianceId } }),
+    report: (id: number) => http.get(`/alliance/qc/report/${id}`),
+    whatIf: (params: any) => http.post('/alliance/whatif/simulate', null, { params }),
+    whatIfList: (allianceId: number) => http.get('/alliance/whatif/list', { params: { allianceId } })
+  }
 }

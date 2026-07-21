@@ -18,6 +18,7 @@ services:
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./sql/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./sql/02_alliance.sql:/docker-entrypoint-initdb.d/02_alliance.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U icu -d icu_monitor"]
       interval: 10s
