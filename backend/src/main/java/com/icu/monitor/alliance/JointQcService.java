@@ -67,16 +67,18 @@ public class JointQcService {
                 .filter(s -> s.getLosDays() != null)
                 .mapToInt(SharedCase::getLosDays).average().orElse(0);
 
-            // SOFA 曲线：按入院天数偏移聚合
+            // SOFA 曲线：聚合每位患者的真实每日 SOFA（按入院天数偏移 Day 0..7）。
+            // 关键：必须用 shared_case.sofa_daily_curve 中存储的真实评分，不允许任何"模拟生成"。
+            //   - 若 sofa_daily_curve 为 null/空：只用 sofa_admission 作为 Day0 计入（不补后续天数）
+            //   - 若数组长度 < 8：仅对存在的下标累加（避免越界）
+            //   - 每日分别取样本均值，未提供该日数据的患者不计入该日
             double[] sofaSum = new double[8];
             int[] sofaCount = new int[8];
             for (SharedCase sc : list) {
-                if (sc.getSofaAdmission() == null) continue;
-                sofaSum[0] += sc.getSofaAdmission();
-                sofaCount[0]++;
-                // 演示用：模拟 SOFA 随天数下降
-                for (int d = 1; d < 8; d++) {
-                    double v = Math.max(0, sc.getSofaAdmission() - d * 0.5);
+                double[] daily = readDailySofa(sc);
+                for (int d = 0; d < 8; d++) {
+                    double v = daily[d];
+                    if (Double.isNaN(v)) continue;
                     sofaSum[d] += v;
                     sofaCount[d]++;
                 }
@@ -85,7 +87,15 @@ public class JointQcService {
             for (int d = 0; d < 8; d++) {
                 ObjectNode o = om.createObjectNode();
                 o.put("day", d);
-                o.put("avg", sofaCount[d] > 0 ? Math.round(sofaSum[d] * 100.0 / sofaCount[d]) / 100.0 : 0);
+                if (sofaCount[d] > 0) {
+                    double avg = sofaSum[d] / sofaCount[d];
+                    o.put("avg", Math.round(avg * 100.0) / 100.0);
+                    o.put("n", sofaCount[d]);
+                } else {
+                    // 当日无真实数据：不再用任何公式伪造，置 null 让前端识别"数据缺失"
+                    o.putNull("avg");
+                    o.put("n", 0);
+                }
                 curve.add(o);
             }
 
@@ -115,6 +125,32 @@ public class JointQcService {
         java.time.LocalDate d = java.time.LocalDate.now();
         int q = (d.getMonthValue() - 1) / 3 + 1;
         return d.getYear() + "Q" + q;
+    }
+
+    /**
+     * 从一条共享病例读取 8 元素每日 SOFA 数组（Day 0..7）。
+     * 真实数据来源：shared_case.sofa_daily_curve（JSONB 数组）。若不存在，仅用 sofa_admission 作 Day0，
+     * 其它天返回 NaN 表示"无真实数据"（聚合端据此跳过，绝不模拟）。
+     * 之所以不允许任何"补全/平滑"：SOFA 曲线的真实性是判别"院区病情演化异常"的核心依据，
+     * 任何减分衰减/线性插值都会让"第 3 天反弹"这类真实信号被掩盖。
+     */
+    private static double[] readDailySofa(SharedCase sc) {
+        double[] daily = new double[8];
+        java.util.Arrays.fill(daily, Double.NaN);
+        JsonNode node = sc.getSofaDailyCurve();
+        if (node != null && node.isArray()) {
+            int n = Math.min(8, node.size());
+            for (int i = 0; i < n; i++) {
+                JsonNode v = node.get(i);
+                if (v == null || v.isNull()) continue;
+                if (v.isNumber()) daily[i] = v.doubleValue();
+            }
+        }
+        // 兜底：若 Day0 缺失但 sofa_admission 有值，用 sofa_admission 填 Day0
+        if (Double.isNaN(daily[0]) && sc.getSofaAdmission() != null) {
+            daily[0] = sc.getSofaAdmission();
+        }
+        return daily;
     }
 
     /**

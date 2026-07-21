@@ -46,6 +46,7 @@ public class AllianceSyncService {
      * @param drgCode DRG 编码
      * @param mdcCode MDC 编码
      * @param sofaAdmission 入院 24h SOFA
+     * @param sofaDailyCurve 真实每日 SOFA（Day 0..7，可空；空时仅写 sofa_admission 作为 Day0）
      * @param vitalsSummary 生命体征统计（min/avg/max）JSON
      * @param labSummary 化验摘要 JSON
      * @param treatmentPath 治疗路径（医嘱时序）JSON
@@ -58,6 +59,7 @@ public class AllianceSyncService {
     @Transactional
     public SharedCase share(long allianceId, long hospitalId, long patientId,
                             String drgCode, String mdcCode, Double sofaAdmission,
+                            JsonNode sofaDailyCurve,
                             JsonNode vitalsSummary, JsonNode labSummary,
                             JsonNode treatmentPath, JsonNode rescueEvents,
                             String outcome, Integer losDays, Boolean infectionFlag,
@@ -90,6 +92,7 @@ public class AllianceSyncService {
             : "UNKNOWN");
         sc.setGender(p.getGender());
         sc.setSofaAdmission(sofaAdmission);
+        sc.setSofaDailyCurve(sofaDailyCurve);
         sc.setDiagnosisText(p.getDiagnosis());
         sc.setVitalsSummary(vitalsSummary);
         sc.setLabSummary(labSummary);

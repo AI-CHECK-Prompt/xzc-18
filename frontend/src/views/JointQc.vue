@@ -84,12 +84,14 @@
         <div class="curve-label">院区 #{{ sc.hospitalId }}</div>
         <div class="curve-bars">
           <div v-for="(pt, i) in sc.sofaCurve" :key="i" class="curve-bar-wrap">
-            <div class="curve-bar" :style="{ height: (pt.avg * 8) + 'px' }" :title="`D${pt.day}: ${pt.avg}`"></div>
+            <div v-if="pt.avg != null" class="curve-bar" :style="{ height: Math.max(2, pt.avg * 8) + 'px' }" :title="`D${pt.day}: ${pt.avg} (n=${pt.n})`"></div>
+            <div v-else class="curve-bar curve-bar-missing" :title="`D${pt.day}: 真实数据缺失 (n=${pt.n || 0})`">—</div>
             <div class="curve-day">D{{ pt.day }}</div>
-            <div class="curve-val">{{ pt.avg }}</div>
+            <div class="curve-val">{{ pt.avg != null ? pt.avg : '缺失' }}</div>
           </div>
         </div>
       </div>
+      <div class="curve-note">数据为联盟共享池中真实每日 SOFA 评分聚合，无真实记录的天数标记为"缺失"（不模拟/不插值）。</div>
     </section>
 
     <section class="card" v-if="reports.length > 0">
@@ -226,8 +228,10 @@ th { color: #6c757d; }
 .curve-bars { display: flex; gap: 4px; align-items: flex-end; height: 100px; }
 .curve-bar-wrap { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .curve-bar { width: 24px; background: linear-gradient(180deg, #4cc9f0, #06d6a0); border-radius: 2px 2px 0 0; }
+.curve-bar-missing { width: 24px; height: 16px; background: transparent; border: 1px dashed #6c757d; color: #6c757d; font-size: 10px; display: flex; align-items: center; justify-content: center; }
 .curve-day { font-size: 10px; color: #6c757d; }
 .curve-val { font-size: 10px; color: #adb5bd; }
+.curve-note { color: #6c757d; font-size: 11px; margin-top: 8px; }
 
 .report-item { padding: 8px 12px; background: #0f1115; border-radius: 3px; margin-bottom: 6px; }
 .report-header { display: flex; justify-content: space-between; }

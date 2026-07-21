@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS shared_case (
     age_band          VARCHAR(16),                      -- 18-29/30-44/45-59/60-74/75+
     gender            VARCHAR(8),
     sofa_admission    DOUBLE PRECISION,                 -- 入院 24h SOFA
+    sofa_daily_curve  JSONB,                            -- 真实每日 SOFA，数组下标=Day 0..7（与 sofa_admission 一致为入院当天）
     apache_admission  DOUBLE PRECISION,                 -- 入院 24h APACHE II（可选）
     diagnosis_text    TEXT,
     vitals_summary    JSONB,                            -- 入院 24h 生命体征统计（min/avg/max）
@@ -50,6 +51,9 @@ CREATE INDEX idx_shared_drg ON shared_case(alliance_id, drg_code);
 CREATE INDEX idx_shared_age ON shared_case(alliance_id, age_band);
 CREATE INDEX idx_shared_sofa ON shared_case(alliance_id, sofa_admission);
 CREATE INDEX idx_shared_outcome ON shared_case(alliance_id, outcome);
+
+-- 兼容已部署库：缺列时补齐（联合质控 SOFA 真实曲线）
+ALTER TABLE shared_case ADD COLUMN IF NOT EXISTS sofa_daily_curve JSONB;
 
 -- 3. 相似病例索引（基于生命体征时序+化验向量化）
 -- 向量以 JSON 数组存储 16 维特征：

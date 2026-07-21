@@ -21,6 +21,8 @@ public class SharedCase {
     @Column(name = "age_band") private String ageBand;
     private String gender;
     @Column(name = "sofa_admission") private Double sofaAdmission;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "sofa_daily_curve", columnDefinition = "jsonb") private JsonNode sofaDailyCurve;
     @Column(name = "apache_admission") private Double apacheAdmission;
     @Column(name = "diagnosis_text") private String diagnosisText;
     @JdbcTypeCode(SqlTypes.JSON)

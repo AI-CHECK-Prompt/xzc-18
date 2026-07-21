@@ -96,12 +96,20 @@ public class AllianceController {
         JsonNode lab    = body != null && body.get("lab")    != null ? om.valueToTree(body.get("lab"))    : null;
         JsonNode path   = body != null && body.get("path")   != null ? om.valueToTree(body.get("path"))   : null;
         JsonNode rescue = body != null && body.get("rescue") != null ? om.valueToTree(body.get("rescue")) : null;
+        // 真实每日 SOFA：Day 0..7 的数组。允许前端传 [day0, day1, ..., day7] 列表或 null（仅 sofa_admission）
+        JsonNode sofaDaily = null;
+        Object rawCurve = body != null ? body.get("sofaDailyCurve") : null;
+        if (rawCurve instanceof List<?> list && !list.isEmpty()) {
+            sofaDaily = om.valueToTree(list);
+        } else if (rawCurve != null) {
+            sofaDaily = om.valueToTree(rawCurve);
+        }
         String outcome  = body != null ? (String) body.getOrDefault("outcome", "SURVIVED") : "SURVIVED";
         Integer losDays = body != null ? ((Number) body.getOrDefault("losDays", 7)).intValue() : 7;
         Boolean infect  = body != null && Boolean.TRUE.equals(body.get("infection"));
 
         SharedCase sc = syncService.share(allianceId, hospitalId, patientId, drgCode, mdcCode,
-            sofaAdmission, vitals, lab, path, rescue, outcome, losDays, infect, OffsetDateTime.now());
+            sofaAdmission, sofaDaily, vitals, lab, path, rescue, outcome, losDays, infect, OffsetDateTime.now());
 
         return Map.of("ok", true, "sharedCaseId", sc.getId(), "poolKey", sc.getPoolPatientKey());
     }
@@ -138,6 +146,7 @@ public class AllianceController {
         m.put("ageBand", s.getAgeBand());
         m.put("gender", s.getGender());
         m.put("sofaAdmission", s.getSofaAdmission());
+        m.put("sofaDailyCurve", s.getSofaDailyCurve());
         m.put("diagnosisText", s.getDiagnosisText());
         m.put("outcome", s.getOutcome());
         m.put("losDays", s.getLosDays());

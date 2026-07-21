@@ -57,6 +57,75 @@ HOSPITAL_MORTALITY_BIAS = {
     3: -0.015,  # 院区 3 略低 -1.5%
 }
 
+def build_real_sofa_curve(sofa0, drg, hospital_id, outcome, los, infection):
+    """
+    生成真实形态的每日 SOFA 曲线（Day 0..7）。
+    关键约束：
+      - 不是任何"sofa0 - d*step"的公式，而是按临床真实演化（早期改善/平台/反弹/感染相关恶化）逐日采样
+      - 院区差异显著：H001 第 3 天易反弹，整体改善斜率更小，达标率偏低
+      - 院区 3 改善最快、最平稳
+      - 院区 2 介于两者之间
+      - 死亡/感染/DRG 也会拉高曲线
+    返回长度为 8 的 list（每个元素是真实 SOFA 评分，可能为 None 表示该日已出院/转出未记录）
+    """
+    curve = [None] * 8
+    curve[0] = round(float(sofa0), 1)
+
+    # 基础每日改善量（按院区分级）：院区 1 慢，院区 2 中，院区 3 快
+    base_improve = {1: 0.4, 2: 0.7, 3: 1.0}.get(hospital_id, 0.7)
+
+    # 院区特定"反弹概率"：H001 第 3 天最易出现"第 3 天反弹"特征
+    rebound_p = {1: 0.45, 2: 0.15, 3: 0.05}.get(hospital_id, 0.15)
+
+    # 感染会推迟改善，DRG 重症（高基础死亡率）整体曲线偏高
+    severity_bias = {
+        "E11A": 1.0, "F15A": 0.5, "A11A": 0.9, "G11A": 1.2,
+        "H11A": 0.6, "B11A": 0.8, "D11A": 0.3, "I11A": 1.4,
+        "J11A": 0.7, "K11A": 0.4,
+    }.get(drg, 0.5)
+
+    # 已出院日之后的评分记为 None（真实世界里不会继续记录）
+    effective_los = max(1, min(7, int(los) - 1))  # los 是住院总天，第 0 天入院
+
+    for d in range(1, 8):
+        if d > effective_los:
+            # 已出院：不再有真实记录
+            curve[d] = None
+            continue
+
+        # 1) 基础衰减：前一天分数按 base_improve 降低
+        prev = curve[d - 1] if curve[d - 1] is not None else sofa0
+        delta = base_improve + random.uniform(-0.4, 0.4)
+
+        # 2) 感染相关恶化：感染患者 Day 2~4 出现恶化跳变
+        if infection and 2 <= d <= 4 and random.random() < 0.55:
+            delta -= random.uniform(0.8, 2.2)
+
+        # 3) 院区反弹：H001 在第 3 天有较大概率反弹（0.6~2.5 分）
+        if hospital_id == 1 and d == 3 and random.random() < rebound_p:
+            delta -= random.uniform(0.6, 2.5)
+
+        # 4) 其它院区低概率反弹（避免过于理想化）
+        if hospital_id != 1 and d in (3, 5) and random.random() < rebound_p:
+            delta -= random.uniform(0.3, 1.2)
+
+        # 5) 死亡患者曲线更陡：Day 4-6 持续升高直至记录截止
+        if outcome == "DECEASED" and d >= 4:
+            delta -= random.uniform(0.5, 1.5)
+
+        # 6) 严重 DRG 加成（曲线整体偏高，H001 显著）
+        if hospital_id == 1:
+            delta -= severity_bias * 0.15
+        else:
+            delta += severity_bias * 0.05  # 院区 2/3 改善得更快
+
+        v = prev - delta  # delta 越大表示"减分越多/改善越快"
+        # 真实 SOFA 不可能负数，但允许较低值（4-6 分表示脏器功能稳定）
+        v = max(0.0, v)
+        curve[d] = round(v, 1)
+
+    return curve
+
 def random_patient(pid, hospital_id):
     drg, mdc, desc, base_mort = random.choice(DRG_POOL)
     # 应用院区偏置
@@ -86,6 +155,19 @@ def random_patient(pid, hospital_id):
     outcome = "DECEASED" if random.random() < mortality else \
               ("TRANSFERRED" if random.random() < 0.15 else "SURVIVED")
 
+    # 真实每日 SOFA 曲线（Day 0..7）。关键：
+    #   - 不再向联盟上传"公式推算"的曲线
+    #   - 由基础状态 + 真实病情演化特征（恶化/反弹/改善）逐日采样
+    #   - 院区差异化：H001 第 3 天反弹 + 整体偏高 + 改善更慢，H003 改善更平滑
+    sofa_curve = build_real_sofa_curve(
+        sofa0=features["sofa"],
+        drg=drg,
+        hospital_id=hospital_id,
+        outcome=outcome,
+        los=los,
+        infection=infection,
+    )
+
     # 治疗路径
     steps = [{"time": f"T+{i*6}h", "itemName": s, "status": "DONE"}
              for i, s in enumerate(TREATMENT_PATH.get(drg, []))]
@@ -98,6 +180,7 @@ def random_patient(pid, hospital_id):
         "drgCode": drg,
         "mdcCode": mdc,
         "sofaAdmission": features["sofa"],
+        "sofaDailyCurve": sofa_curve,
         "features": features,
         "outcome": outcome,
         "losDays": los,
@@ -140,7 +223,10 @@ def share_to_pool(alliance_id, hospital_id, case):
             "rescue": case["rescue"],
             "outcome": case["outcome"],
             "losDays": case["losDays"],
-            "infection": case["infection"]
+            "infection": case["infection"],
+            # 真实每日 SOFA（Day 0..7）。后端会写入 shared_case.sofa_daily_curve，
+            # 联合质控按真实曲线聚合，不再用 sofaAdmission - d*0.5 公式伪造
+            "sofaDailyCurve": case["sofaDailyCurve"]
         }, timeout=5)
         return r.json() if r.ok else {"ok": False, "err": r.text}
     except Exception as e:
