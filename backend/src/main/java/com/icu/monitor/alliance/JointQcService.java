@@ -197,6 +197,48 @@ public class JointQcService {
     }
 
     /**
+     * 入选"重点关注高死亡率 DRG"的最小样本量阈值。
+     * <p>
+     * 设为 10 是为了避免小样本极端值（如 1 死 / 2 病例 = 50% 死亡率）被打成"高死亡率 DRG"，
+     * 造成整改资源错配（按 Pareto 临床经验，季度内 ≥10 例才有统计意义）。
+     */
+    static final int MIN_SAMPLE_FOR_HIGH_MORTALITY = 10;
+
+    /**
+     * 从 drgBreakdown 列表中选出"死亡率最高 DRG"。
+     * <p>
+     * 规则：
+     *   1) 只在 total_cases >= minSample 的 DRG 中选（避免"1/2=50%"这种小样本极端值）
+     *   2) 当 mortality 相同时，优先选 total_cases 较大的（更可靠的信号）
+     *   3) 若全部 DRG 都不满足最小样本（演示场景/数据极少），返回 null，由调用方决定兜底策略
+     *   4) breakdown 为空或 null 时返回 null
+     * <p>
+     * 该方法为 static + package-private，便于纯逻辑单测（无 Spring/DB 依赖）。
+     * 历史 bug（2026-07-21）：generateReport 此前直接取 breakdown.get(0)，但 drgBreakdown
+     * DAO 按 total_cases DESC 排序，导致"高死亡率"实际是"病例数最多"，
+     * 掩盖了真正高死亡率的 DRG。
+     */
+    static Map<String, Object> selectHighMortalityDrg(List<Map<String, Object>> breakdown, int minSample) {
+        if (breakdown == null || breakdown.isEmpty()) return null;
+        Map<String, Object> best = null;
+        for (Map<String, Object> d : breakdown) {
+            int totalCases = ((Number) d.get("total_cases")).intValue();
+            if (totalCases < minSample) continue;
+            double mortality = ((Number) d.get("alliance_mortality")).doubleValue();
+            if (best == null) {
+                best = d;
+                continue;
+            }
+            double bestMort = ((Number) best.get("alliance_mortality")).doubleValue();
+            int bestCases = ((Number) best.get("total_cases")).intValue();
+            if (mortality > bestMort || (mortality == bestMort && totalCases > bestCases)) {
+                best = d;
+            }
+        }
+        return best;
+    }
+
+    /**
      * 生成季度联合质控报告
      */
     @Transactional
@@ -208,17 +250,61 @@ public class JointQcService {
             return null;
         }
 
-        // 重点：找出死亡率最高的 DRG、明显低于均值的院区
-        Map<String, Object> top = breakdown.get(0);
-        String highDrg = (String) top.get("drg_code");
-        double highMortality = ((Number) top.get("alliance_mortality")).doubleValue();
+        // ============================================================
+        // 关键修复（历史 bug：2026-07-21）
+        // 此前 generateReport 用 breakdown.get(0) 取"高死亡率 DRG"，但 drgBreakdown
+        // DAO 是按 total_cases DESC 排序的，导致"高死亡率"实际是"病例数最多"。
+        // 现象：综合三甲医院的"肺部感染 DRG"病例数最多且治愈率很高（死亡率 2%），
+        //       始终排在首部，掩盖了真正死亡率 18% 的某小样本 DRG（如"急性胰腺炎重症"）。
+        // 修复：分别取"病例数最多 DRG"（规模维度）和"死亡率最高 DRG"（重点关注维度），
+        //       并对后者加最小样本量阈值，避免小样本极端值浪费整改资源。
+        // ============================================================
+
+        // (a) 病例数最多 DRG：DAO 默认按 total_cases DESC 排序，首项即
+        Map<String, Object> mostCasesDrg = breakdown.get(0);
+        String mostCasesDrgCode = (String) mostCasesDrg.get("drg_code");
+        int mostCasesTotal = ((Number) mostCasesDrg.get("total_cases")).intValue();
+        double mostCasesMortality = ((Number) mostCasesDrg.get("alliance_mortality")).doubleValue();
+
+        // (b) 死亡率最高 DRG：在 total_cases >= MIN_SAMPLE_FOR_HIGH_MORTALITY 的 DRG 中按 alliance_mortality 选最大
+        //    委派给纯逻辑方法 selectHighMortalityDrg，便于单测
+        Map<String, Object> highMortDrg = selectHighMortalityDrg(breakdown, MIN_SAMPLE_FOR_HIGH_MORTALITY);
+        // 兜底：若所有 DRG 都不满足最小样本（演示场景/数据极少），回退到全体中死亡率最高的，
+        // 避免 report 没有 highMortDrg 导致后续 JSON 节点为 null
+        if (highMortDrg == null) {
+            log.warn("【联合质控】所有 DRG 病例数均 < {}，回退到全体中死亡率最高的 DRG", MIN_SAMPLE_FOR_HIGH_MORTALITY);
+            highMortDrg = breakdown.stream()
+                .max(Comparator.comparing(d -> ((Number) d.get("alliance_mortality")).doubleValue()))
+                .orElse(mostCasesDrg);
+        }
+        String highDrg = (String) highMortDrg.get("drg_code");
+        double highMortality = ((Number) highMortDrg.get("alliance_mortality")).doubleValue();
+        int highMortTotalCases = ((Number) highMortDrg.get("total_cases")).intValue();
+        int highMortTotalDeaths = ((Number) highMortDrg.get("total_deaths")).intValue();
+
+        log.info("【联合质控】mostCasesDrg={} cases={} mortality={}; highMortalityDrg={} mortality={} cases={} deaths={}",
+            mostCasesDrgCode, mostCasesTotal, mostCasesMortality,
+            highDrg, highMortality, highMortTotalCases, highMortTotalDeaths);
 
         ArrayNode highlights = om.createArrayNode();
+        // 重点 1（规模维度）：病例数最多 DRG —— 仅描述规模，不作为整改对象
+        ObjectNode h0 = om.createObjectNode();
+        h0.put("type", "TOP_VOLUME_DRG");
+        h0.put("drgCode", mostCasesDrgCode);
+        h0.put("totalCases", mostCasesTotal);
+        h0.put("mortality", mostCasesMortality);
+        h0.put("note", "联盟中病例数最多的 DRG，反映规模，不直接作为重点关注");
+        highlights.add(h0);
+        // 重点 2（重点关注维度）：死亡率最高 DRG —— 整改资源应投到此处
         ObjectNode h1 = om.createObjectNode();
-        h1.put("type", "TOP_DRG");
+        h1.put("type", "HIGH_MORTALITY_DRG");
         h1.put("drgCode", highDrg);
         h1.put("mortality", highMortality);
-        h1.put("note", "联盟中病例数最多、死亡率最高的 DRG");
+        h1.put("totalCases", highMortTotalCases);
+        h1.put("totalDeaths", highMortTotalDeaths);
+        h1.put("minSample", MIN_SAMPLE_FOR_HIGH_MORTALITY);
+        h1.put("note", "联盟中死亡率最高的 DRG（已过滤总例数 < " + MIN_SAMPLE_FOR_HIGH_MORTALITY
+            + " 的样本，避免小样本极端值）");
         highlights.add(h1);
 
         // 跨院区对比
@@ -242,9 +328,12 @@ public class JointQcService {
 
         // 改进建议
         ArrayNode actions = om.createArrayNode();
+        // 优先级 HIGH：整改对象是高死亡率 DRG（不是病例数最多 DRG，避免与摘要/重点 1 混淆）
         ObjectNode a1 = om.createObjectNode();
         a1.put("drgCode", highDrg);
         a1.put("action", "对高死亡率 DRG 开展专项根因复盘，对比联盟最优院区诊疗路径");
+        a1.put("mortality", highMortality);
+        a1.put("totalCases", highMortTotalCases);
         a1.put("priority", "HIGH");
         actions.add(a1);
         ObjectNode a2 = om.createObjectNode();
@@ -258,9 +347,11 @@ public class JointQcService {
         rep.setAllianceId(allianceId);
         rep.setPeriodQuarter(periodQuarter);
         rep.setTitle("联合质控季度报告 - " + periodQuarter);
-        rep.setSummary("联盟共覆盖 " + breakdown.size() + " 个 DRG 编码，" +
-            "病例数最多 DRG=" + highDrg + "，联盟死亡率=" +
-            Math.round(highMortality * 10000) / 100.0 + "%");
+        // 摘要明确区分两个维度，避免"高死亡率 DRG 实际是病例数最多"的旧 bug 误导决策者
+        rep.setSummary("联盟共覆盖 " + breakdown.size() + " 个 DRG 编码；" +
+            "病例数最多 DRG=" + mostCasesDrgCode + "(病例=" + mostCasesTotal + "), " +
+            "死亡率最高 DRG=" + highDrg + "(死亡率=" +
+            Math.round(highMortality * 10000) / 100.0 + "%, 病例=" + highMortTotalCases + ")");
         rep.setHighlights(highlights);
         rep.setDrgBreakdown(drgBreakdownNode);
         rep.setActionItems(actions);

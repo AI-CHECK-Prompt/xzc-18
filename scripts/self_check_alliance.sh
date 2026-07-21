@@ -171,6 +171,68 @@ REP=$(curl -s -X POST "$API/alliance/qc/report?allianceId=$ALLI_ID")
 REP_ID=$(echo "$REP" | $PY -c "import sys,json; print(json.load(sys.stdin)['reportId'])")
 [ "$REP_ID" -gt "0" ] && ok "Joint report generated: id=$REP_ID" || err "report not generated"
 
+# 13a) 回归用例：报告的"高死亡率 DRG"必须按 mortality 排序，不能等于"病例数最多 DRG"
+#      历史 bug：generateReport 用 breakdown.get(0) 取"高死亡率 DRG"，
+#      但 drgBreakdown DAO 是按 total_cases DESC 排序，导致"高死亡率"实际是"病例数最多"，
+#      掩盖真正高死亡率的 DRG（如 18% 死亡率的急性胰腺炎重症被 2% 死亡率的肺部感染 DRG 掩盖）。
+echo "[13a] 报告的'高死亡率 DRG' != '病例数最多 DRG'（回归：按 mortality 而非 case_count 选 DRG）"
+REP_DETAIL=$(curl -s "$API/alliance/qc/report/$REP_ID")
+BR_RAW=$(curl -s "$API/alliance/qc/breakdown?allianceId=$ALLI_ID")
+echo "$REP_DETAIL" | $PY -c "
+import sys, json
+rep = json.load(sys.stdin)
+br  = json.loads('''$BR_RAW''')
+
+# 1) summary 必须同时出现'病例数最多 DRG'和'死亡率最高 DRG'两个标签
+summary = rep.get('summary', '')
+ok_summary = ('病例数最多 DRG' in summary) and ('死亡率最高 DRG' in summary)
+
+# 2) highlights 必须分别有 TOP_VOLUME_DRG 和 HIGH_MORTALITY_DRG 两类
+hs = rep.get('highlights', [])
+types = [h.get('type') for h in hs]
+ok_h0 = 'TOP_VOLUME_DRG' in types
+ok_h1 = 'HIGH_MORTALITY_DRG' in types
+
+# 3) 取出两个维度的 DRG code
+top_vol   = next((h for h in hs if h.get('type') == 'TOP_VOLUME_DRG'), None)
+top_mort  = next((h for h in hs if h.get('type') == 'HIGH_MORTALITY_DRG'), None)
+if not top_vol or not top_mort:
+    print('FAIL: missing TOP_VOLUME_DRG or HIGH_MORTALITY_DRG in highlights')
+    sys.exit()
+vol_code  = top_vol.get('drgCode')
+mort_code = top_mort.get('drgCode')
+vol_cases = top_vol.get('totalCases')
+mort_cases = top_mort.get('totalCases')
+mort_mr   = top_mort.get('mortality')
+
+# 4) DRG 全维度对比：按 mortality 找 max（要求 case_count>=10）
+eligible = [d for d in br if int(d.get('total_cases', 0)) >= 10]
+if not eligible:
+    eligible = br  # 兜底
+expected_mort = max(eligible, key=lambda d: float(d.get('alliance_mortality', 0)))
+expected_mort_code = expected_mort['drg_code']
+expected_mort_mr   = float(expected_mort['alliance_mortality'])
+
+# 5) action_items[0].drgCode 必须等于 mortality 最高的 DRG（不是病例数最多的）
+a1 = (rep.get('actionItems') or [{}])[0]
+a1_drg = a1.get('drgCode')
+
+# 6) 关键断言：报告的 highMortDrg 必须是 DRG 列表中 mortality 最高的
+#    若等于 top_vol_code 且二者不同，则是 bug
+ok_distinct = (vol_code != mort_code) or (vol_code == mort_code and mort_mr >= expected_mort_mr - 1e-6 and mort_cases == vol_cases)
+ok_match    = (mort_code == expected_mort_code)
+ok_action   = (a1_drg == mort_code)
+
+print('  病例数最多 DRG =', vol_code,  'cases=', vol_cases)
+print('  死亡率最高 DRG =', mort_code, 'mortality=', mort_mr, 'cases=', mort_cases)
+print('  全维度最大 mortality 期望 =', expected_mort_code, 'mortality=', expected_mort_mr)
+print('  actionItems[0].drgCode =', a1_drg)
+ok = ok_summary and ok_h0 and ok_h1 and ok_distinct and ok_match and ok_action
+print('OK' if ok else 'FAIL')
+" | tee /tmp/_report_high_mort.log | grep -q "^OK" \
+    && ok "Report distinguishes 'TOP_VOLUME_DRG' vs 'HIGH_MORTALITY_DRG' and highMortDrg is the real max-mortality DRG" \
+    || err "highMortDrg regression: report's highMortDrg collides with mostCasesDrg or doesn't match real max-mortality"
+
 # 14) 跨院区死亡率差异校验（演示场景：H001 偏高）
 echo "[14] 跨院区死亡率差异（H001 应偏高）"
 echo "$QC" | $PY -c "
