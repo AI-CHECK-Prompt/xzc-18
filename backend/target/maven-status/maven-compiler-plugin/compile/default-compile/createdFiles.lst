@@ -1,3 +1,4 @@
+com\icu\monitor\alliance\PlanRecommendService.class
 com\icu\monitor\domain\NursingRecord.class
 com\icu\monitor\alliance\SimilarCaseService$SimilarHit.class
 com\icu\monitor\alliance\WhatIfService.class
@@ -5,6 +6,7 @@ com\icu\monitor\controller\ApiController.class
 com\icu\monitor\domain\Bed.class
 com\icu\monitor\repository\TimeSeriesDao.class
 com\icu\monitor\scoring\MEWSResult.class
+com\icu\monitor\alliance\PlanRecommendService$RecommendResult.class
 com\icu\monitor\config\WebSocketConfig.class
 com\icu\monitor\config\JacksonConfig.class
 com\icu\monitor\ingest\RawIngestConsumer$Agg$Snapshot.class
@@ -44,6 +46,7 @@ com\icu\monitor\domain\PlaybackItem.class
 com\icu\monitor\repository\alliance\WhatIfSessionRepo.class
 com\icu\monitor\domain\alliance\AllianceMember.class
 com\icu\monitor\repository\alliance\QcMetricRepo.class
+com\icu\monitor\alliance\PlanRecommendService$RecommendItem.class
 com\icu\monitor\protocol\tcp\PrivateTcpAdapter$FrameHandler.class
 com\icu\monitor\scoring\ScoreContext.class
 com\icu\monitor\repository\AlertEscalationPolicyRepo.class
@@ -70,6 +73,7 @@ com\icu\monitor\repository\alliance\AllianceMemberRepo.class
 com\icu\monitor\alert\AlertEngine$DedupState.class
 com\icu\monitor\domain\AlertEvent.class
 com\icu\monitor\domain\Patient.class
+com\icu\monitor\alliance\SimilarCaseService$SeverityMatch.class
 com\icu\monitor\alert\AlertEngine$RecentVitals.class
 com\icu\monitor\domain\alliance\HospitalAlliance.class
 com\icu\monitor\repository\DeviceChannelRepo.class

@@ -165,6 +165,10 @@ public class AllianceController {
     /**
      * 新患者入院 24 小时内调用
      * 入参：allianceId, drgCode, 16 维生命体征+化验特征
+     * <p>
+     * 返回字段中带 severityMatch / rawSimilarity / queryBand / candidateBand / querySofa / candidateSofa，
+     * 便于 clinical safety review 定位"真正相似的高 SOFA 病例"。
+     * similarity=0 的命中是严重程度轴硬阈值丢弃的 OUT_OF_BAND 候选，临床不可信。
      */
     @PostMapping("/similar/top")
     public Map<String, Object> topSimilar(@RequestParam long allianceId,
@@ -184,6 +188,13 @@ public class AllianceController {
             m.put("ageBand", h.sharedCase.getAgeBand());
             m.put("gender", h.sharedCase.getGender());
             m.put("similarity", Math.round(h.similarity * 1000) / 1000.0);
+            // 临床安全审计：原始余弦相似度（未叠加严重程度惩罚）
+            m.put("rawSimilarity", Math.round(h.rawSimilarity * 1000) / 1000.0);
+            m.put("querySofa", h.querySofa);
+            m.put("candidateSofa", h.candidateSofa);
+            m.put("queryBand", h.queryBand);
+            m.put("candidateBand", h.candidateBand);
+            m.put("severityMatch", h.severityMatch.name());
             m.put("outcome", h.sharedCase.getOutcome());
             m.put("losDays", h.sharedCase.getLosDays());
             m.put("infection", h.sharedCase.getInfectionFlag());

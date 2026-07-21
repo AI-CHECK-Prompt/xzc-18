@@ -184,6 +184,78 @@ avg=d['allianceAvgMortality']
 print('OK' if h001 > avg else 'FAIL')
 " | grep -q "OK" && ok "H001 mortality ($h001) above alliance average ($avg) — demo scenario validated" || err "H001 not above avg"
 
+# 15) 严重程度轴回归（clinical safety）
+#     场景：SOFA=3 的轻症患者，TOP 命中里不允许出现 SOFA>=12 的极重症候选
+#     此前 bug：余弦只看特征方向，轻症 vs 极重症可能得到 0.85+ 相似度
+#     现在：|Δband|>=2 的候选被相似检索硬阈值丢弃（severityMatch=OUT_OF_BAND）
+echo "[15] 严重程度轴约束（轻症 SOFA=3 不应匹配极重症 SOFA>=12）"
+# 15a) 轻症查询：sofa=3
+LIGHT=$(curl -s -X POST "$API/alliance/similar/top?allianceId=$ALLI_ID&drgCode=E11A&topN=20" \
+    -H "Content-Type: application/json" \
+    -d '{"hrAvg":75,"hrStd":8,"sbpAvg":125,"sbpStd":10,"spo2Avg":98,"spo2Std":1,"tempAvg":36.6,"respAvg":16,"creatinine":0.9,"platelet":220,"bilirubin":0.6,"dopamine":0,"lactate":1.0,"wbc":7,"pfRatio":400,"sofa":3}')
+echo "$LIGHT" | $PY -c "
+import sys, json
+d=json.load(sys.stdin)
+hits=d['hits']
+# 验证 1：返回里至少要有 MATCH/ADJACENT（说明同/相邻带还有命中）
+matched=[h for h in hits if h.get('severityMatch') in ('MATCH','ADJACENT')]
+out_of_band=[h for h in hits if h.get('severityMatch')=='OUT_OF_BAND']
+# 验证 2：MATCH/ADJACENT 的 candidateSofa 必须 < 8（重症带起点）
+ok_band = all(h.get('candidateSofa', 0) < 8 for h in matched)
+# 验证 3：OUT_OF_BAND 的 candidateSofa 必须 >= 8（被硬阈值丢弃）
+ok_drop = all(h.get('candidateSofa', 0) >= 8 for h in out_of_band)
+# 验证 4：MATCH/ADJACENT 的 final similarity 必须 > 0
+ok_pos  = all(h.get('similarity', 0) > 0 for h in matched)
+# 验证 5：OUT_OF_BAND 的 final similarity 必须 = 0
+ok_zero = all(h.get('similarity', 0) == 0 for h in out_of_band)
+print('  query sofa=3 匹配数=%d 丢弃数=%d' % (len(matched), len(out_of_band)))
+print('  candidateSofa范围 匹配=[%s, %s] 丢弃=[%s, %s]' % (
+    min((h.get('candidateSofa', 0) for h in matched), default='-'),
+    max((h.get('candidateSofa', 0) for h in matched), default='-'),
+    min((h.get('candidateSofa', 0) for h in out_of_band), default='-'),
+    max((h.get('candidateSofa', 0) for h in out_of_band), default='-')))
+print('OK' if (ok_band and ok_drop and ok_pos and ok_zero and len(matched) > 0) else 'FAIL')
+" | tee /tmp/_severity_axis_light.log | grep -q "^OK" && ok "SOFA=3 query: no severity-3 (SOFA>=12) case slipped into MATCH/ADJACENT" || err "severity axis violated for SOFA=3 query (light)"
+
+# 15b) 重症查询：sofa=14
+echo "[15b] 严重程度轴约束（重症 SOFA=14 不应匹配轻症 SOFA<=3）"
+SEVERE=$(curl -s -X POST "$API/alliance/similar/top?allianceId=$ALLI_ID&drgCode=E11A&topN=20" \
+    -H "Content-Type: application/json" \
+    -d '{"hrAvg":120,"hrStd":25,"sbpAvg":85,"sbpStd":22,"spo2Avg":88,"spo2Std":5,"tempAvg":38.2,"respAvg":28,"creatinine":3.2,"platelet":60,"bilirubin":3.5,"dopamine":15,"lactate":5.5,"wbc":20,"pfRatio":120,"sofa":14}')
+echo "$SEVERE" | $PY -c "
+import sys, json
+d=json.load(sys.stdin)
+hits=d['hits']
+matched=[h for h in hits if h.get('severityMatch') in ('MATCH','ADJACENT')]
+out_of_band=[h for h in hits if h.get('severityMatch')=='OUT_OF_BAND']
+# 验证 1：MATCH/ADJACENT 的 candidateSofa 必须 >= 8（轻症被硬阈值丢弃）
+ok_band = all(h.get('candidateSofa', 0) >= 8 for h in matched)
+# 验证 2：OUT_OF_BAND 的 candidateSofa 必须 <= 3
+ok_drop = all(h.get('candidateSofa', 0) <= 3 for h in out_of_band)
+print('  query sofa=14 匹配数=%d 丢弃数=%d' % (len(matched), len(out_of_band)))
+print('  candidateSofa范围 匹配=[%s, %s] 丢弃=[%s, %s]' % (
+    min((h.get('candidateSofa', 0) for h in matched), default='-'),
+    max((h.get('candidateSofa', 0) for h in matched), default='-'),
+    min((h.get('candidateSofa', 0) for h in out_of_band), default='-'),
+    max((h.get('candidateSofa', 0) for h in out_of_band), default='-')))
+print('OK' if (ok_band and ok_drop and len(matched) > 0) else 'FAIL')
+" | tee /tmp/_severity_axis_severe.log | grep -q "^OK" && ok "SOFA=14 query: no severity-0 (SOFA<=3) case slipped into MATCH/ADJACENT" || err "severity axis violated for SOFA=14 query (severe)"
+
+# 15c) 方案推荐端：低 SOFA 相似病例的"成功路径"不应被聚合成 evidenceLevel=C 推荐给高 SOFA 患者
+echo "[15c] 方案推荐端：重症患者不应被推'轻症成功路径'"
+REC_SEVERE=$(curl -s -X POST "$API/alliance/plan/recommend?allianceId=$ALLI_ID&drgCode=E11A&currentHospitalId=1" \
+    -H "Content-Type: application/json" \
+    -d '{"hrAvg":120,"hrStd":25,"sbpAvg":85,"sbpStd":22,"spo2Avg":88,"spo2Std":5,"tempAvg":38.2,"respAvg":28,"creatinine":3.2,"platelet":60,"bilirubin":3.5,"dopamine":15,"lactate":5.5,"wbc":20,"pfRatio":120,"sofa":14}')
+echo "$REC_SEVERE" | $PY -c "
+import sys, json
+d=json.load(sys.stdin)
+sim=d.get('similarCases', [])
+# 如果相似病例列表里有 SOFA<=3 的轻症候选且 similarity>0，视为 bug
+violations=[s for s in sim if s.get('candidateSofa', 99) <= 3 and s.get('similarity', 0) > 0]
+print('  方案推荐相似病例数=%d 低SOFA违规=%d' % (len(sim), len(violations)))
+print('OK' if len(violations) == 0 else 'FAIL')
+" | tee /tmp/_severity_axis_rec.log | grep -q "^OK" && ok "Plan recommend: no light-case (SOFA<=3) similar case has similarity>0 for severe patient" || err "Plan recommend leaked light cases to severe patient"
+
 echo "================================================"
 printf "Pass: \033[32m%d\033[0m  Fail: \033[31m%d\033[0m\n" "$PASS" "$FAIL"
 [ "$FAIL" = "0" ] && exit 0 || exit 1

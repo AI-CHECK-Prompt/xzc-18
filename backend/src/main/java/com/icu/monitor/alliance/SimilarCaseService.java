@@ -35,10 +35,32 @@ import java.util.stream.Collectors;
  * [15] sofa         SOFA 评分
  * <p>
  * 余弦相似度 = dot(a,b) / (|a|*|b|)
+ * <p>
+ * 严重程度轴约束（clinical safety）：
+ * - 仅靠"特征向量方向"对齐会忽略 SOFA 量级。SOFA=3 的轻症患者
+ *   在余弦意义上可能与 SOFA=14 的重症患者方向接近（其它维度都"正常"），
+ *   导致把"轻症成功路径"作为 evidenceLevel=C 推荐给当前重症患者。
+ * - 因此叠加"严重程度带（severity band）"约束：
+ *   * 4 个 band：[0,4) 轻症、[4,8) 中症、[8,12) 重症、[12,∞) 极重症
+ *   * |Δband| >= 2（轻症 vs 极重症 / 中症 vs 极重症等）：硬阈值，sim 置 0
+ *     → 防止把"轻症成功路径"推到重症患者身上
+ *   * |Δband| = 1：相邻带，软惩罚（×0.55）
+ *   * 同带内：再按 |Δsofa| 线性衰减（每 1 分 -5%，封底 0.5）
  */
 @Service
 public class SimilarCaseService {
     private static final Logger log = LoggerFactory.getLogger(SimilarCaseService.class);
+
+    /** SOFA 严重程度带分界（4 个带：0/1/2/3） */
+    private static final double[] SOFA_BAND_EDGES = {0.0, 4.0, 8.0, 12.0};
+    /** 相邻带的软惩罚系数（gap==1 时使用） */
+    private static final double ADJACENT_BAND_PENALTY = 0.55;
+    /** 同带内每 1 分 SOFA 差的衰减系数（再叠加） */
+    private static final double SAME_BAND_SOFA_DECAY = 0.05;
+    /** 同带内惩罚的下限（保证 0.5 以上，不会把同带高分也压成 0） */
+    private static final double SAME_BAND_PENALTY_FLOOR = 0.5;
+    /** 硬阈值的最小 band 差（>= 视为严重程度不匹配） */
+    private static final int HARD_DROP_BAND_GAP = 2;
 
     @Autowired private SharedCaseRepo sharedCaseRepo;
     @Autowired private SimilarIndexRepo similarIndexRepo;
@@ -89,6 +111,12 @@ public class SimilarCaseService {
 
     /**
      * 检索 Top-N 相似病例
+     * <p>
+     * 排序评分 = 余弦相似度 × 严重程度轴惩罚（clinical safety）：
+     * 1. 先算 16 维向量的余弦相似度（只看特征向量"方向"）
+     * 2. 再叠加 SOFA 严重程度带约束：硬阈值丢弃跨带候选、相邻带软惩罚、同带内按 |Δsofa| 衰减
+     * 3. 排序取 Top-N；被丢弃的候选会写日志，便于 clinical safety review 定位"真正相似的高 SOFA 病例"
+     *
      * @param allianceId 联盟 id
      * @param queryVec 16 维查询向量（新患者特征）
      * @param drgFilter 可选：限定 DRG 编码
@@ -121,8 +149,14 @@ public class SimilarCaseService {
         for (double v : queryVec) qNorm += v * v;
         qNorm = Math.sqrt(qNorm);
 
-        // 余弦相似度排序
+        // 严重程度轴信息（queryVec[15] 即 SOFA 评分）
+        double querySofa = queryVec.length > 15 ? queryVec[15] : 0.0;
+        int queryBand = sofaBand(querySofa);
+
+        // 余弦相似度 × 严重程度惩罚
         List<SimilarHit> hits = new ArrayList<>();
+        int droppedOutOfBand = 0;        // 硬阈值丢弃（gap>=2）
+        int demotedAdjacent = 0;         // 相邻带被降权（gap==1）
         for (SharedCase sc : pool) {
             double[] v = buildVector(sc);
             double dot = 0, n = 0;
@@ -131,14 +165,54 @@ public class SimilarCaseService {
                 n += v[i] * v[i];
             }
             n = Math.sqrt(n);
-            double sim = (qNorm * n == 0) ? 0 : dot / (qNorm * n);
-            hits.add(new SimilarHit(sc, sim));
+            double rawSim = (qNorm * n == 0) ? 0 : dot / (qNorm * n);
+
+            // 严重程度轴约束
+            double candSofa = v[15];
+            int candBand = sofaBand(candSofa);
+            int gap = Math.abs(queryBand - candBand);
+            SeverityMatch match;
+            double penalty;
+            if (gap >= HARD_DROP_BAND_GAP) {
+                // 硬阈值：严重程度轴方向不匹配，直接丢弃
+                // 避免把"轻症成功路径"作为 evidenceLevel=C 推荐给重症患者
+                match = SeverityMatch.OUT_OF_BAND;
+                penalty = 0.0;
+                droppedOutOfBand++;
+            } else if (gap == 1) {
+                // 相邻带：软惩罚
+                match = SeverityMatch.ADJACENT;
+                penalty = ADJACENT_BAND_PENALTY;
+                demotedAdjacent++;
+            } else {
+                // 同带：按 |Δsofa| 线性衰减，封底 0.5
+                match = SeverityMatch.MATCH;
+                double absDelta = Math.abs(querySofa - candSofa);
+                penalty = Math.max(SAME_BAND_PENALTY_FLOOR,
+                    1.0 - SAME_BAND_SOFA_DECAY * absDelta);
+            }
+            double finalSim = rawSim * penalty;
+            // 保留原 rawSim 用于临床安全审计（前端可见）
+            hits.add(new SimilarHit(sc, finalSim, rawSim, queryBand, candBand, querySofa, candSofa, match));
         }
+        // 按"被严重程度惩罚后"的最终相似度排序
         hits.sort((a, b) -> Double.compare(b.similarity, a.similarity));
         if (hits.size() > topN) hits = hits.subList(0, topN);
         long cost = System.currentTimeMillis() - t0;
-        log.info("【相似检索】联盟 {} DRG={} 池容量={} TopN={} 耗时={}ms", allianceId, drgFilter, pool.size(), topN, cost);
+        log.info("【相似检索】联盟 {} DRG={} 池容量={} querySOFA={} band={} TopN={} 硬丢弃={} 相邻带降权={} 耗时={}ms",
+            allianceId, drgFilter, pool.size(), querySofa, queryBand, topN, droppedOutOfBand, demotedAdjacent, cost);
         return hits;
+    }
+
+    /**
+     * SOFA 严重程度带
+     * band=0 轻症 [0,4)；band=1 中症 [4,8)；band=2 重症 [8,12)；band=3 极重症 [12,∞)
+     */
+    public static int sofaBand(double sofa) {
+        if (sofa < SOFA_BAND_EDGES[1]) return 0;
+        if (sofa < SOFA_BAND_EDGES[2]) return 1;
+        if (sofa < SOFA_BAND_EDGES[3]) return 2;
+        return 3;
     }
 
     private static double getJsonNumber(JsonNode node, String field, double def) {
@@ -148,10 +222,45 @@ public class SimilarCaseService {
         try { return Double.parseDouble(v.asText()); } catch (Exception e) { return def; }
     }
 
+    /** 严重程度轴匹配标签（用于 clinical safety review） */
+    public enum SeverityMatch {
+        /** 同带，无惩罚 */
+        MATCH,
+        /** 相邻带（gap=1），已软惩罚 ×0.55 */
+        ADJACENT,
+        /** 跨带（gap>=2），硬阈值丢弃；保留枚举值以便审计 */
+        OUT_OF_BAND
+    }
+
     /** 检索结果封装 */
     public static class SimilarHit {
         public final SharedCase sharedCase;
+        /** 经严重程度轴惩罚后的最终相似度（用于排序与展示） */
         public final double similarity;
-        public SimilarHit(SharedCase s, double sim) { this.sharedCase = s; this.similarity = sim; }
+        /** 原始余弦相似度（未叠加严重程度惩罚），用于临床安全审计 */
+        public final double rawSimilarity;
+        /** 查询 SOFA 所属 band（0=轻症/1=中症/2=重症/3=极重症） */
+        public final int queryBand;
+        /** 候选 SOFA 所属 band */
+        public final int candidateBand;
+        public final double querySofa;
+        public final double candidateSofa;
+        public final SeverityMatch severityMatch;
+
+        public SimilarHit(SharedCase s, double sim) { this(s, sim, sim, -1, -1, 0, 0, SeverityMatch.MATCH); }
+
+        public SimilarHit(SharedCase s, double sim, double rawSim,
+                          int queryBand, int candBand,
+                          double querySofa, double candSofa,
+                          SeverityMatch match) {
+            this.sharedCase = s;
+            this.similarity = sim;
+            this.rawSimilarity = rawSim;
+            this.queryBand = queryBand;
+            this.candidateBand = candBand;
+            this.querySofa = querySofa;
+            this.candidateSofa = candSofa;
+            this.severityMatch = match;
+        }
     }
 }

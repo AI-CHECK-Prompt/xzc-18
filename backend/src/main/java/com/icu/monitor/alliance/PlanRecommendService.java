@@ -64,20 +64,28 @@ public class PlanRecommendService {
         }
 
         // 2) 联盟内相似病例的治疗路径聚合成"低证据级别"方案（C）
-        List<SimilarCaseService.SimilarHit> hits = similarCaseService.searchTopN(
+        //    注意：SimilarCaseService.searchTopN 已叠加"严重程度轴"硬阈值/软惩罚，
+        //    similarity=0 的候选是 OUT_OF_BAND（严重程度不匹配），临床不可信——
+        //    下面只对 similarity>0 的命中做治疗路径聚合，避免把"轻症成功路径"推给重症患者。
+        List<SimilarCaseService.SimilarHit> rawHits = similarCaseService.searchTopN(
             allianceId, queryVec, drgCode, 10, currentHospitalId);
-        r.similarCases = hits.stream().map(h -> {
+        List<SimilarCaseService.SimilarHit> hits = rawHits.stream()
+            .filter(h -> h.similarity > 0.0)
+            .collect(Collectors.toList());
+        int outOfBandFiltered = rawHits.size() - hits.size();
+        r.similarCases = rawHits.stream().map(h -> {
             Map<String, Object> m = new HashMap<>();
             m.put("sharedCaseId", h.sharedCase.getId());
             m.put("sourceHospital", h.sharedCase.getSourceHospital());
             m.put("drgCode", h.sharedCase.getDrgCode());
             m.put("similarity", Math.round(h.similarity * 1000) / 1000.0);
-            m.put("outcome", h.sharedCase.getOutcome());
-            m.put("losDays", h.sharedCase.getLosDays());
-            m.put("infection", h.sharedCase.getInfectionFlag());
-            m.put("admissionAt", h.sharedCase.getAdmissionAt());
-            m.put("treatmentPath", h.sharedCase.getTreatmentPath());
-            m.put("rescueEvents", h.sharedCase.getRescueEvents());
+            // 临床安全审计字段：原始余弦相似度、SOFA、严重程度带、匹配标签
+            m.put("rawSimilarity", Math.round(h.rawSimilarity * 1000) / 1000.0);
+            m.put("querySofa", h.querySofa);
+            m.put("candidateSofa", h.candidateSofa);
+            m.put("queryBand", h.queryBand);
+            m.put("candidateBand", h.candidateBand);
+            m.put("severityMatch", h.severityMatch.name());
             return m;
         }).collect(Collectors.toList());
 
@@ -148,8 +156,8 @@ public class PlanRecommendService {
             int ob = "A".equals(b.evidenceLevel) ? 0 : "B".equals(b.evidenceLevel) ? 1 : 2;
             return Integer.compare(oa, ob);
         });
-        log.info("【方案推荐】联盟 {} DRG={} 指南={} 相似病例={} 模板={} 当前院区={}",
-            allianceId, drgCode, guidelines.size(), hits.size(), templates.size(), currentHospitalId);
+        log.info("【方案推荐】联盟 {} DRG={} 指南={} 相似病例={}（已过滤严重程度不匹配={}） 模板={} 当前院区={}",
+            allianceId, drgCode, guidelines.size(), hits.size(), outOfBandFiltered, templates.size(), currentHospitalId);
         return r;
     }
 
